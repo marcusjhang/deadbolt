@@ -273,11 +273,49 @@ DEADBOLT_STATE_DIR="$LOCK_ENFORCE_STATE" DEADBOLT_HOSTS_PATH="$LOCK_ENFORCE_HOST
 echo "== lock reports but does not crash when hosts file not writable =="
 NOTWRITABLE_LOCK_STATE="$(mktemp -d -t deadbolt-state-locknw)"
 NOTWRITABLE_LOCK_HOSTS="$(mktemp -t deadbolt-hosts-locknw)"
-trap 'rm -f "$FIXTURE" "$KEYS_FIXTURE" "$EMPTY_FIXTURE" "$HOSTS_FILE" "$APPS_FILE" "$NOTWRITABLE_HOSTS" "$LOCK_ENFORCE_HOSTS" "$NOTWRITABLE_LOCK_HOSTS"; rm -rf "$STATE_DIR" "$E_STATE" "$D_STATE" "$I_STATE" "$BLOCK_STATE" "$NOTWRITABLE_STATE" "$LOCK_ENFORCE_STATE" "$NOTWRITABLE_LOCK_STATE"' EXIT
+trap 'rm -f "$FIXTURE" "$KEYS_FIXTURE" "$EMPTY_FIXTURE" "$HOSTS_FILE" "$APPS_FILE" "$NOTWRITABLE_HOSTS" "$LOCK_ENFORCE_HOSTS" "$NOTWRITABLE_LOCK_HOSTS" "$DIAG_FILE"; rm -rf "$STATE_DIR" "$E_STATE" "$D_STATE" "$I_STATE" "$BLOCK_STATE" "$NOTWRITABLE_STATE" "$LOCK_ENFORCE_STATE" "$NOTWRITABLE_LOCK_STATE" "$DIAG_STATE"' EXIT
 printf '# keep\n' > "$NOTWRITABLE_LOCK_HOSTS"
 chmod 0444 "$NOTWRITABLE_LOCK_HOSTS"
 DEADBOLT_STATE_DIR="$NOTWRITABLE_LOCK_STATE" DEADBOLT_HOSTS_PATH="$NOTWRITABLE_LOCK_HOSTS" "$BIN/deadboltctl" lock >/dev/null 2>&1
 DEADBOLT_STATE_DIR="$NOTWRITABLE_LOCK_STATE" "$BIN/deadboltctl" status --fake "$KEYS_FIXTURE" | grep -q 'state: locked'
 chmod 0644 "$NOTWRITABLE_LOCK_HOSTS"
+
+echo "== make-app.sh builds and signs Deadbolt.app =="
+bash scripts/make-app.sh
+APP="build/Deadbolt.app"
+[[ -d "$APP" ]]
+[[ -f "$APP/Contents/MacOS/Deadbolt" ]]
+[[ -x "$APP/Contents/MacOS/Deadbolt" ]]
+[[ -f "$APP/Contents/Info.plist" ]]
+[[ -d "$APP/Contents/Resources" ]]
+
+echo "== re-running make-app.sh succeeds (re-runnable) =="
+bash scripts/make-app.sh
+
+echo "== Info.plist validates and sets required keys =="
+plutil -lint "$APP/Contents/Info.plist"
+[[ "$(plutil -extract CFBundleIdentifier raw "$APP/Contents/Info.plist")" == "com.deadbolt.app" ]]
+[[ "$(plutil -extract LSUIElement raw "$APP/Contents/Info.plist")" == "true" ]]
+[[ "$(plutil -extract CFBundlePackageType raw "$APP/Contents/Info.plist")" == "APPL" ]]
+[[ "$(plutil -extract CFBundleExecutable raw "$APP/Contents/Info.plist")" == "Deadbolt" ]]
+[[ "$(plutil -extract LSMinimumSystemVersion raw "$APP/Contents/Info.plist")" == "13.0" ]]
+[[ -n "$(plutil -extract CFBundleShortVersionString raw "$APP/Contents/Info.plist")" ]]
+[[ -n "$(plutil -extract CFBundleVersion raw "$APP/Contents/Info.plist")" ]]
+
+echo "== bundle is ad-hoc signed =="
+codesign --verify "$APP"
+
+echo "== Deadbolt --version =="
+"$APP/Contents/MacOS/Deadbolt" --version | grep -q "Deadbolt"
+
+echo "== Deadbolt --diagnostics emits parseable JSON and exits 0 =="
+DIAG_STATE="$(mktemp -d -t deadbolt-diag-state)"
+DIAG_FILE="$(mktemp -t deadbolt-diag)"
+DEADBOLT_STATE_DIR="$DIAG_STATE" "$APP/Contents/MacOS/Deadbolt" --diagnostics > "$DIAG_FILE"
+python3 -c 'import json,sys; json.load(sys.stdin)' < "$DIAG_FILE"
+grep -q '"version"' "$DIAG_FILE"
+grep -q '"attachedKey"' "$DIAG_FILE"
+grep -q '"hostsPathWritable"' "$DIAG_FILE"
+grep -q '"enrolledKeyCount"' "$DIAG_FILE"
 
 echo "E2E OK"
