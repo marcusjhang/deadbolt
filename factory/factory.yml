@@ -1,31 +1,47 @@
 schemaVersion: psf/v1
 name: deadbolt
-description: Deadbolt — a macOS focus blocker unlocked by a physical USB key.
+description: "Deadbolt \u2014 a macOS focus blocker unlocked by a physical USB key."
 runner: subprocess
 runnerOptions:
-  command: ["psf-agent-opencode", "--model", "deepseek/deepseek-v4-pro", "--permissions", "workspace", "--timeout", "2400"]
+  command:
+  - psf-agent-opencode
+  - --model
+  - deepseek/deepseek-v4-pro
+  - --permissions
+  - workspace
+  - --timeout
+  - '2400'
   timeout: 2400
-mode: "yolo"          # hitl = human in the loop; yolo = human out (autonomous)
+mode: yolo
 agents:
-  triage:    { prompt: agents/triage.md }
-  spec:      { prompt: agents/spec.md }
-  implement: { prompt: agents/implement.md }
-  verify:    { prompt: agents/verify.md }
-  review:    { prompt: agents/review.md }
+  triage:
+    prompt: agents/triage.md
+  spec:
+    prompt: agents/spec.md
+  implement:
+    prompt: agents/implement.md
+  verify:
+    prompt: agents/verify.md
+  review:
+    prompt: agents/review.md
 gates:
   spec_approval: true
   verify_quorum: 2
-  verify_command: "bash scripts/e2e.sh"
+  verify_command: bash scripts/e2e.sh
 limits:
   max_attempts: 3
   max_minutes: 45
 feedback:
   upstream: marcusjhang/personal-software-factory
-  mode: "off"          # off | hint | auto
+  mode: 'hint'
 classifier:
-  provider: "mock"          # mock | jev (TypeSafe). Advisory only.
+  provider: mock
   supervisor:
     enabled: false
-    thresholds: {needs_human: 0.80, off_track: 0.80, stuck: 0.80, progress: 0.40}
+    thresholds:
+      needs_human: 0.8
+      off_track: 0.8
+      stuck: 0.8
+      progress: 0.4
     max_steers: 1
     max_retries: 1
