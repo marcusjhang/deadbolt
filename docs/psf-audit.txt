@@ -1,0 +1,9 @@
+[OK  ] factory.compile                  deadbolt runner=subprocess max_attempts=3
+[OK  ] ledger.chain                     ok
+[OK  ] state.illegal_transitions        none
+[OK  ] state.digest_bound_approval      all approved work items are digest-bound
+[OK  ] ledger.work_items                5 work item(s)
+[OK  ] benchmark.non_regression         baseline 43% -> factory 100% (7/7)
+[OK  ] guardrails.suite                 6/6 passed
+[OK  ] adapters.suite                   8/8 passed
+healthy: True

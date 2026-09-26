@@ -4,7 +4,7 @@
 
 Deadbolt removes distracting apps and websites system-wide on macOS and locks "off" behind a physical key: you enroll any USB device you're willing to stash away, then you must plug it back in to end a focus session. Same idea as [Brick](https://getbrick.com) for your phone — applied to the Mac, with hardware you already own.
 
-> Status: **planning complete, no code yet.** Start with [`HANDOVER.md`](./HANDOVER.md).
+> Status: **M0 spike built and verified** — menu-bar app, USB-key registry, lock/unlock, and enforcement, with 72 tests and an end-to-end gate. See [`docs/M0-STATUS.md`](./docs/M0-STATUS.md); plan in [`HANDOVER.md`](./HANDOVER.md).
 
 ## Why this exists
 
@@ -19,6 +19,7 @@ Deadbolt occupies that gap: **OS-level enforcement + a physical USB key.**
 | Doc | What it is |
 |---|---|
 | [`HANDOVER.md`](./HANDOVER.md) | **Start here.** Project status, decisions, how to begin, open questions. |
+| [`docs/M0-STATUS.md`](./docs/M0-STATUS.md) | What was built and verified in the M0 spike, how to build/run it, known limits. |
 | [`docs/market-research.md`](./docs/market-research.md) | Competitive landscape + macOS technical feasibility (primary sources). |
 | [`docs/product-summary.md`](./docs/product-summary.md) | Condensed product definition, positioning, business model. |
 | [`docs/usb-key-design.md`](./docs/usb-key-design.md) | Deep technical design of the USB-key unlock mechanism. |

@@ -1,0 +1,6 @@
+work items: 5
+  BLOCKED      1
+  DONE         4
+attempts: 7  retries: 2  blocked: 1
+outcomes: accepted 5  review-escape 0  cost $0.00  human 0 min
+events: 97  chain: ok
