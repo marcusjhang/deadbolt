@@ -1,8 +1,8 @@
 import Foundation
 
-/// Orchestrates lock/unlock and menu state for the menu-bar app. Holds the
-/// injected dependencies (device source, state directory, hosts path,
-/// terminator) so the SwiftUI layer stays a thin view over this logic.
+/// Orchestrates lock/unlock, watch evaluation, and menu state for the menu-bar
+/// app. Holds the injected dependencies (device source, state directory, hosts
+/// path, terminator) so the SwiftUI layer stays a thin view over this logic.
 public struct DeadboltController {
     public let stateDirectory: URL
     public let hostsPath: String
@@ -26,13 +26,47 @@ public struct DeadboltController {
         (try? LockStore(directory: stateDirectory).read()) ?? .unlocked
     }
 
+    /// The current persisted lock snapshot, including any timed-lock deadline.
+    public func currentSnapshot() -> LockSnapshot {
+        (try? LockStore(directory: stateDirectory).readSnapshot())
+            ?? LockSnapshot(state: .unlocked, lockedUntil: nil)
+    }
+
     /// Builds the menu-bar model from the current state and attached devices.
     public func menuBarModel() -> MenuBarModel {
-        MenuBarModel(
+        let snapshot = currentSnapshot()
+        return MenuBarModel(
             deviceSource: deviceSource,
             registry: KeyRegistry(directory: stateDirectory),
-            state: currentState()
+            state: snapshot.state,
+            lockedUntil: snapshot.lockedUntil,
+            now: Clock.now()
         )
+    }
+
+    /// Re-evaluates the watch loop once and returns the resulting model. When
+    /// `lockOnKeyRemoval` is enabled, the machine is unlocked, and no enrolled
+    /// key is attached, this transitions to locked and applies enforcement.
+    @discardableResult
+    public func refresh() -> MenuBarModel {
+        let store = LockStore(directory: stateDirectory)
+        let snapshot = currentSnapshot()
+        let lockOnKeyRemoval =
+            (try? ConfigStore(directory: stateDirectory).lockOnKeyRemoval()) ?? false
+        let keys = (try? KeyRegistry(directory: stateDirectory).load()) ?? []
+        let devices = (try? deviceSource.listDevices()) ?? []
+        let attached = LockMachine.attachedKey(devices: devices, keys: keys) != nil
+
+        let next = Watch.nextState(
+            current: snapshot.state,
+            lockOnKeyRemoval: lockOnKeyRemoval,
+            attachedKey: attached
+        )
+        if next != snapshot.state {
+            try? store.write(next, lockedUntil: next == .locked ? snapshot.lockedUntil : nil)
+            try? enforce(next)
+        }
+        return menuBarModel()
     }
 
     /// Locks the system and applies enforcement. Enforcement is best-effort: a
@@ -48,8 +82,8 @@ public struct DeadboltController {
         return currentState()
     }
 
-    /// Unlocks the system when an enrolled key is attached, clearing
-    /// enforcement. Does nothing when no enrolled key matches.
+    /// Unlocks the system when an enrolled key is attached and any timed lock
+    /// has elapsed, clearing enforcement. Does nothing otherwise.
     @discardableResult
     public func unlock() -> LockState {
         guard menuBarModel().unlockEnabled else { return currentState() }

@@ -103,4 +103,44 @@ final class MenuBarModelTests: XCTestCase {
         XCTAssertTrue(model.enrolledKeys.isEmpty)
         XCTAssertFalse(model.unlockEnabled)
     }
+
+    func testUnlockDisabledDuringActiveTimedLockEvenWithKeyAttached() {
+        let device = USBDeviceIdentity(
+            vendorID: 1234, productID: 5678, serialNumber: "ABC123456789"
+        )
+        let key = self.key(device, label: "Key")
+        let until = Clock.parseRFC3339("2026-01-01T00:30:00Z")!
+
+        let active = MenuBarModel(
+            state: .locked, devices: [device], keys: [key],
+            lockedUntil: until, now: Clock.parseRFC3339("2026-01-01T00:00:00Z")!
+        )
+        XCTAssertTrue(active.timedLockActive)
+        XCTAssertFalse(active.unlockEnabled)
+
+        let elapsed = MenuBarModel(
+            state: .locked, devices: [device], keys: [key],
+            lockedUntil: until, now: Clock.parseRFC3339("2026-01-01T00:31:00Z")!
+        )
+        XCTAssertFalse(elapsed.timedLockActive)
+        XCTAssertTrue(elapsed.unlockEnabled)
+    }
+
+    func testRemainingTimeStringWhileTimedLockActive() {
+        let until = Clock.parseRFC3339("2026-01-01T00:30:00Z")!
+
+        let active = MenuBarModel(
+            state: .locked, devices: [], keys: [],
+            lockedUntil: until, now: Clock.parseRFC3339("2026-01-01T00:00:00Z")!
+        )
+        XCTAssertEqual(active.remainingMinutes, 30)
+        XCTAssertEqual(active.remainingTimeString, "30 minutes remaining")
+
+        let elapsed = MenuBarModel(
+            state: .locked, devices: [], keys: [],
+            lockedUntil: until, now: Clock.parseRFC3339("2026-01-01T00:31:00Z")!
+        )
+        XCTAssertNil(elapsed.remainingTimeString)
+        XCTAssertNil(elapsed.remainingMinutes)
+    }
 }

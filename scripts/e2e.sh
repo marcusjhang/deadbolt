@@ -280,6 +280,86 @@ DEADBOLT_STATE_DIR="$NOTWRITABLE_LOCK_STATE" DEADBOLT_HOSTS_PATH="$NOTWRITABLE_L
 DEADBOLT_STATE_DIR="$NOTWRITABLE_LOCK_STATE" "$BIN/deadboltctl" status --fake "$KEYS_FIXTURE" | grep -q 'state: locked'
 chmod 0644 "$NOTWRITABLE_LOCK_HOSTS"
 
+echo "== timed lock: lock --for 30 persists lockedUntil; unlock fails with remaining time =="
+TIMED_STATE="$(mktemp -d -t deadbolt-state-timed)"
+CFG_STATE="$(mktemp -d -t deadbolt-state-cfg)"
+WATCH_STATE="$(mktemp -d -t deadbolt-state-watch)"
+WATCH_HOSTS="$(mktemp -t deadbolt-hosts-watch)"
+WATCH_APPS="$(mktemp -t deadbolt-apps-watch).json"
+trap 'rm -f "$FIXTURE" "$KEYS_FIXTURE" "$EMPTY_FIXTURE" "$HOSTS_FILE" "$APPS_FILE" "$NOTWRITABLE_HOSTS" "$LOCK_ENFORCE_HOSTS" "$NOTWRITABLE_LOCK_HOSTS" "$DIAG_FILE" "$WATCH_HOSTS" "$WATCH_APPS"; rm -rf "$STATE_DIR" "$E_STATE" "$D_STATE" "$I_STATE" "$BLOCK_STATE" "$NOTWRITABLE_STATE" "$LOCK_ENFORCE_STATE" "$NOTWRITABLE_LOCK_STATE" "$DIAG_STATE" "$TIMED_STATE" "$CFG_STATE" "$WATCH_STATE"' EXIT
+
+NOW="2026-01-01T00:00:00Z"
+LATER="2026-01-01T00:31:00Z"
+DEADBOLT_STATE_DIR="$TIMED_STATE" "$BIN/deadboltctl" enroll 1 --fake "$KEYS_FIXTURE" --label "Timed Key"
+DEADBOLT_STATE_DIR="$TIMED_STATE" DEADBOLT_NOW="$NOW" "$BIN/deadboltctl" lock --for 30
+TIMED_STATUS="$(DEADBOLT_STATE_DIR="$TIMED_STATE" DEADBOLT_NOW="$NOW" "$BIN/deadboltctl" status --fake "$KEYS_FIXTURE")"
+echo "$TIMED_STATUS"
+[[ "$TIMED_STATUS" == *'state: locked'* ]]
+[[ "$TIMED_STATUS" == *'lockedUntil'* ]]
+[[ "$TIMED_STATUS" == *'remainingMinutes: 30'* ]]
+
+echo "== status --json includes lockedUntil and remainingMinutes =="
+TIMED_JSON="$(DEADBOLT_STATE_DIR="$TIMED_STATE" DEADBOLT_NOW="$NOW" "$BIN/deadboltctl" status --json --fake "$KEYS_FIXTURE")"
+echo "$TIMED_JSON"
+[[ "$TIMED_JSON" == *'"state" : "locked"'* ]]
+[[ "$TIMED_JSON" == *'"lockedUntil"'* ]]
+[[ "$TIMED_JSON" == *'"remainingMinutes" : 30'* ]]
+
+echo "== unlock fails during active timed lock even with key attached =="
+UNLOCK_ERR="$(DEADBOLT_STATE_DIR="$TIMED_STATE" DEADBOLT_NOW="$NOW" "$BIN/deadboltctl" unlock --fake "$KEYS_FIXTURE" 2>&1 >/dev/null || true)"
+echo "$UNLOCK_ERR"
+[[ "$UNLOCK_ERR" == *'remaining'* ]]
+[[ "$(DEADBOLT_STATE_DIR="$TIMED_STATE" DEADBOLT_NOW="$NOW" "$BIN/deadboltctl" status --fake "$KEYS_FIXTURE")" == *'state: locked'* ]]
+
+echo "== advancing DEADBOLT_NOW past lockedUntil lets unlock succeed =="
+DEADBOLT_STATE_DIR="$TIMED_STATE" DEADBOLT_NOW="$LATER" "$BIN/deadboltctl" unlock --fake "$KEYS_FIXTURE"
+[[ "$(DEADBOLT_STATE_DIR="$TIMED_STATE" DEADBOLT_NOW="$LATER" "$BIN/deadboltctl" status --fake "$KEYS_FIXTURE")" == *'state: unlocked'* ]]
+
+echo "== config get/set/list for lockOnKeyRemoval =="
+[[ "$(DEADBOLT_STATE_DIR="$CFG_STATE" "$BIN/deadboltctl" config get lockOnKeyRemoval)" == "off" ]]
+DEADBOLT_STATE_DIR="$CFG_STATE" "$BIN/deadboltctl" config set lockOnKeyRemoval on
+[[ "$(DEADBOLT_STATE_DIR="$CFG_STATE" "$BIN/deadboltctl" config get lockOnKeyRemoval)" == "on" ]]
+CFG_LIST="$(DEADBOLT_STATE_DIR="$CFG_STATE" "$BIN/deadboltctl" config list)"
+echo "$CFG_LIST"
+[[ "$CFG_LIST" == *'lockOnKeyRemoval'* ]]
+[[ "$CFG_LIST" == *'on'* ]]
+CFG_JSON="$(DEADBOLT_STATE_DIR="$CFG_STATE" "$BIN/deadboltctl" config list --json)"
+echo "$CFG_JSON"
+[[ "$CFG_JSON" == *'"lockOnKeyRemoval" : true'* ]]
+if DEADBOLT_STATE_DIR="$CFG_STATE" "$BIN/deadboltctl" config set lockOnKeyRemoval maybe >/dev/null 2>&1; then
+    echo "expected config set with invalid value to fail" >&2
+    exit 1
+fi
+
+echo "== watch --once locks when key absent with lockOnKeyRemoval on =="
+cat > "$WATCH_APPS" <<'JSON'
+[
+  {"bundleIdentifier": "com.apple.Safari", "name": "Safari"}
+]
+JSON
+printf '# keep\n' > "$WATCH_HOSTS"
+DEADBOLT_STATE_DIR="$WATCH_STATE" "$BIN/deadboltctl" config set lockOnKeyRemoval on
+DEADBOLT_STATE_DIR="$WATCH_STATE" "$BIN/deadboltctl" enroll 1 --fake "$KEYS_FIXTURE" --label "Watch Key"
+DEADBOLT_STATE_DIR="$WATCH_STATE" "$BIN/deadboltctl" block add-domain example.com
+
+DEADBOLT_STATE_DIR="$WATCH_STATE" DEADBOLT_FAKE_DEVICES="$EMPTY_FIXTURE" DEADBOLT_FAKE_APPS="$WATCH_APPS" "$BIN/deadboltctl" watch --once --hosts-path "$WATCH_HOSTS"
+[[ "$(DEADBOLT_STATE_DIR="$WATCH_STATE" "$BIN/deadboltctl" status --fake "$EMPTY_FIXTURE")" == *'state: locked'* ]]
+grep -q 'BEGIN DEADBOLT' "$WATCH_HOSTS"
+
+echo "== watch --once while unlocked clears the hosts block =="
+DEADBOLT_STATE_DIR="$WATCH_STATE" "$BIN/deadboltctl" unlock --fake "$KEYS_FIXTURE"
+DEADBOLT_STATE_DIR="$WATCH_STATE" DEADBOLT_FAKE_DEVICES="$KEYS_FIXTURE" DEADBOLT_FAKE_APPS="$WATCH_APPS" "$BIN/deadboltctl" watch --once --hosts-path "$WATCH_HOSTS"
+[[ "$(DEADBOLT_STATE_DIR="$WATCH_STATE" "$BIN/deadboltctl" status --fake "$KEYS_FIXTURE")" == *'state: unlocked'* ]]
+! grep -q 'BEGIN DEADBOLT' "$WATCH_HOSTS"
+grep -q '# keep' "$WATCH_HOSTS"
+
+echo "== long-running watch exits cleanly (0) on SIGINT =="
+DEADBOLT_STATE_DIR="$WATCH_STATE" DEADBOLT_FAKE_DEVICES="$EMPTY_FIXTURE" DEADBOLT_FAKE_APPS="$WATCH_APPS" "$BIN/deadboltctl" watch --interval 1 --hosts-path "$WATCH_HOSTS" &
+WPID=$!
+sleep 1.5
+kill -INT "$WPID"
+wait "$WPID"
+
 echo "== make-app.sh builds and signs Deadbolt.app =="
 bash scripts/make-app.sh
 APP="build/Deadbolt.app"

@@ -66,7 +66,7 @@ final class DeadboltViewModel: ObservableObject {
     }
 
     func refresh() {
-        snapshot = controller.menuBarModel()
+        snapshot = controller.refresh()
     }
 
     func lock() {
@@ -88,6 +88,9 @@ struct MenuBarMenu: View {
         VStack(alignment: .leading, spacing: 6) {
             Text("State: \(model.statusText)")
             Text("Key: \(model.attachedKeyDescription)")
+            if let remaining = model.remainingTimeString {
+                Text(remaining)
+            }
             Divider()
             Button("Lock") { viewModel.lock() }
                 .disabled(model.state == .locked)

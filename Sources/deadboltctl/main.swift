@@ -1,3 +1,4 @@
+import Darwin
 import DeadboltCore
 import Foundation
 
@@ -36,6 +37,10 @@ case "block":
     runBlock(Array(arguments.dropFirst()))
 case "enforce":
     runEnforce(Array(arguments.dropFirst()))
+case "config":
+    runConfig(Array(arguments.dropFirst()))
+case "watch":
+    runWatch(Array(arguments.dropFirst()))
 default:
     printUsage()
     exit(2)
@@ -49,9 +54,13 @@ func printUsage() {
     print("  enroll <selector> [--label NAME] [--allow-weak] [--allow-internal] [--fake <fixture.json>]")
     print("  keys [--json]")
     print("  unenroll <selector-or-label>")
-    print("  lock")
+    print("  lock [--for <minutes>]")
     print("  unlock [--fake <fixture.json>]")
     print("  status [--json] [--fake <fixture.json>]")
+    print("  config get <key>")
+    print("  config set <key> <value>")
+    print("  config list [--json]")
+    print("  watch [--interval <seconds>] [--hosts-path <path>] [--once]")
     print("  reset --force")
     print("  block add-domain <domain>")
     print("  block remove-domain <domain>")
@@ -60,7 +69,8 @@ func printUsage() {
     print("  block list [--json]")
     print("  enforce [--dry-run] [--hosts-path <path>]")
     print("environment: DEADBOLT_FAKE_DEVICES=<fixture.json>, DEADBOLT_STATE_DIR=<dir>,")
-    print("             DEADBOLT_HOSTS_PATH=<hosts-path>, DEADBOLT_FAKE_APPS=<fixture.json>")
+    print("             DEADBOLT_HOSTS_PATH=<hosts-path>, DEADBOLT_FAKE_APPS=<fixture.json>,")
+    print("             DEADBOLT_NOW=<RFC3339>")
 }
 
 func resolveSource(arguments: [String]) throws -> DeviceSource {
@@ -207,8 +217,22 @@ func runUnenroll(_ arguments: [String]) {
 
 func runLock(_ arguments: [String]) {
     do {
-        try LockStore(directory: StateDirectory.resolve()).write(.locked)
+        let now = Clock.now()
+        let lockedUntil: Date?
+        if let minutesValue = value(for: "--for", in: arguments) {
+            guard let minutes = Int(minutesValue), minutes > 0 else {
+                fputs("error: --for requires a positive integer number of minutes\n", stderr)
+                exit(2)
+            }
+            lockedUntil = now.addingTimeInterval(TimeInterval(minutes * 60))
+        } else {
+            lockedUntil = nil
+        }
+        try LockStore(directory: StateDirectory.resolve()).write(.locked, lockedUntil: lockedUntil)
         print("locked")
+        if let lockedUntil {
+            print("lockedUntil: \(Clock.formatRFC3339(lockedUntil))")
+        }
         enforceAfterLockChange(arguments: arguments, state: .locked)
     } catch {
         fputs("error: \(error)\n", stderr)
@@ -218,6 +242,15 @@ func runLock(_ arguments: [String]) {
 
 func runUnlock(_ arguments: [String]) {
     do {
+        let store = LockStore(directory: StateDirectory.resolve())
+        let snapshot = try store.readSnapshot()
+        let now = Clock.now()
+
+        if let remaining = LockMachine.remainingMinutes(lockedUntil: snapshot.lockedUntil, now: now) {
+            fputs("error: timed lock active, \(remaining) minute(s) remaining\n", stderr)
+            exit(1)
+        }
+
         let source = try resolveSource(arguments: arguments)
         let devices = try source.listDevices()
         let keys = try KeyRegistry(directory: StateDirectory.resolve()).load()
@@ -225,7 +258,7 @@ func runUnlock(_ arguments: [String]) {
             fputs("error: no enrolled key attached\n", stderr)
             exit(1)
         }
-        try LockStore(directory: StateDirectory.resolve()).write(.unlocked)
+        try store.write(.unlocked)
         print("unlocked")
         enforceAfterLockChange(arguments: arguments, state: .unlocked)
     } catch {
@@ -258,18 +291,32 @@ func enforceAfterLockChange(arguments: [String], state: LockState) {
 func runStatus(_ arguments: [String]) {
     let json = arguments.contains("--json")
     do {
-        let state = try LockStore(directory: StateDirectory.resolve()).read()
+        let store = LockStore(directory: StateDirectory.resolve())
+        let snapshot = try store.readSnapshot()
+        let now = Clock.now()
         let keys = try KeyRegistry(directory: StateDirectory.resolve()).load()
         let source = try resolveSource(arguments: arguments)
         let devices = try source.listDevices()
         let attached = LockMachine.attachedKey(devices: devices, keys: keys)
+        let remaining = LockMachine.remainingMinutes(lockedUntil: snapshot.lockedUntil, now: now)
 
         if json {
-            let report = StatusReport(state: state.rawValue, attachedKey: attached?.label)
+            let report = StatusReport(
+                state: snapshot.state.rawValue,
+                attachedKey: attached?.label,
+                lockedUntil: snapshot.lockedUntil,
+                remainingMinutes: remaining
+            )
             let data = try DeadboltJSON.encoder.encode(report)
             print(String(data: data, encoding: .utf8) ?? "")
         } else {
-            print("state: \(state.rawValue)")
+            print("state: \(snapshot.state.rawValue)")
+            if let lockedUntil = snapshot.lockedUntil {
+                print("lockedUntil: \(Clock.formatRFC3339(lockedUntil))")
+                if let remaining {
+                    print("remainingMinutes: \(remaining)")
+                }
+            }
             print("attachedKey: \(attached?.label ?? "none")")
         }
     } catch {
@@ -296,6 +343,8 @@ func runReset(_ arguments: [String]) {
 private struct StatusReport: Encodable {
     let state: String
     let attachedKey: String?
+    let lockedUntil: Date?
+    let remainingMinutes: Int?
 }
 
 func runBlock(_ arguments: [String]) {
@@ -373,6 +422,147 @@ func runEnforce(_ arguments: [String]) {
     } catch {
         fputs("error: \(error)\n", stderr)
         exit(1)
+    }
+}
+
+func runConfig(_ arguments: [String]) {
+    guard let sub = arguments.first else {
+        fputs("error: config requires a subcommand (get/set/list)\n", stderr)
+        exit(2)
+    }
+    do {
+        let store = ConfigStore(directory: StateDirectory.resolve())
+        switch sub {
+        case "get":
+            guard let key = arguments.dropFirst().first else {
+                fputs("error: config get requires a key\n", stderr)
+                exit(2)
+            }
+            guard key == "lockOnKeyRemoval" else {
+                fputs("error: unknown config key '\(key)'\n", stderr)
+                exit(2)
+            }
+            let value = try store.lockOnKeyRemoval()
+            print(value ? "on" : "off")
+        case "set":
+            guard let key = arguments.dropFirst().first else {
+                fputs("error: config set requires a key\n", stderr)
+                exit(2)
+            }
+            guard let value = arguments.dropFirst().dropFirst().first else {
+                fputs("error: config set requires a value\n", stderr)
+                exit(2)
+            }
+            guard key == "lockOnKeyRemoval" else {
+                fputs("error: unknown config key '\(key)'\n", stderr)
+                exit(2)
+            }
+            switch value {
+            case "on":
+                try store.setLockOnKeyRemoval(true)
+            case "off":
+                try store.setLockOnKeyRemoval(false)
+            default:
+                fputs("error: lockOnKeyRemoval must be 'on' or 'off'\n", stderr)
+                exit(2)
+            }
+            print("lockOnKeyRemoval \(value)")
+        case "list":
+            let value = try store.lockOnKeyRemoval()
+            if arguments.contains("--json") {
+                let data = try DeadboltJSON.encoder.encode(ConfigList(lockOnKeyRemoval: value))
+                print(String(data: data, encoding: .utf8) ?? "")
+            } else {
+                print("lockOnKeyRemoval\t\(value ? "on" : "off")")
+            }
+        default:
+            fputs("error: unknown config subcommand '\(sub)'\n", stderr)
+            exit(2)
+        }
+    } catch {
+        fputs("error: \(error)\n", stderr)
+        exit(1)
+    }
+}
+
+private struct ConfigList: Encodable {
+    let lockOnKeyRemoval: Bool
+}
+
+private struct WatchOutcome {
+    let state: LockState
+    let hostsAction: EnforcementResult.HostsAction
+}
+
+private func handleSIGINT(_ signal: Int32) {
+    exit(0)
+}
+
+func runWatch(_ arguments: [String]) {
+    let once = arguments.contains("--once")
+    let interval = Int(value(for: "--interval", in: arguments) ?? "") ?? 2
+
+    if once {
+        if let outcome = watchPass(arguments: arguments) {
+            print("state: \(outcome.state.rawValue)")
+            print("hosts: \(outcome.hostsAction == .applied ? "applied" : "cleared")")
+        }
+        exit(0)
+    }
+
+    signal(SIGINT, handleSIGINT)
+    var lastState: LockState?
+    var lastHostsAction: EnforcementResult.HostsAction?
+    while true {
+        if let outcome = watchPass(arguments: arguments) {
+            if lastState != outcome.state {
+                print("state: \(outcome.state.rawValue)")
+                lastState = outcome.state
+            }
+            if lastHostsAction != outcome.hostsAction {
+                print("hosts: \(outcome.hostsAction == .applied ? "applied" : "cleared")")
+                lastHostsAction = outcome.hostsAction
+            }
+        }
+        Thread.sleep(forTimeInterval: TimeInterval(max(1, interval)))
+    }
+}
+
+private func watchPass(arguments: [String]) -> WatchOutcome? {
+    let stateDir = StateDirectory.resolve()
+    do {
+        let store = LockStore(directory: stateDir)
+        let snapshot = try store.readSnapshot()
+        let lockOnKeyRemoval = try ConfigStore(directory: stateDir).lockOnKeyRemoval()
+        let keys = try KeyRegistry(directory: stateDir).load()
+        let source = try resolveSource(arguments: arguments)
+        let devices = try source.listDevices()
+        let attached = LockMachine.attachedKey(devices: devices, keys: keys) != nil
+
+        let next = Watch.nextState(
+            current: snapshot.state,
+            lockOnKeyRemoval: lockOnKeyRemoval,
+            attachedKey: attached
+        )
+        if next != snapshot.state {
+            try store.write(next, lockedUntil: next == .locked ? snapshot.lockedUntil : nil)
+        }
+
+        let blockList = try BlockStore(directory: stateDir).load()
+        let terminator = try resolveTerminator()
+        let hostsPath = configuredHostsPath(arguments: arguments)
+            ?? HostsPath.resolve(explicit: nil, environment: ProcessInfo.processInfo.environment)
+        let report = try Enforcer.run(
+            state: next,
+            blockList: blockList,
+            hostsBlocker: HostsBlocker(hostsPath: hostsPath),
+            terminator: terminator,
+            dryRun: false
+        )
+        return WatchOutcome(state: next, hostsAction: report.hostsAction)
+    } catch {
+        fputs("error: \(error)\n", stderr)
+        return nil
     }
 }
 
