@@ -167,4 +167,117 @@ echo "$STATUS_AFTER_RESET"
 [[ "$STATUS_AFTER_RESET" == *'state: unlocked'* ]]
 [[ "$STATUS_AFTER_RESET" == *'attachedKey: none'* ]]
 
+echo "== block add/remove domain and app, observable via list --json =="
+BLOCK_STATE="$(mktemp -d -t deadbolt-state-block)"
+HOSTS_FILE="$(mktemp -t deadbolt-hosts)"
+APPS_FILE="$(mktemp -t deadbolt-apps).json"
+trap 'rm -f "$FIXTURE" "$KEYS_FIXTURE" "$EMPTY_FIXTURE" "$HOSTS_FILE" "$APPS_FILE"; rm -rf "$STATE_DIR" "$E_STATE" "$D_STATE" "$I_STATE" "$BLOCK_STATE"' EXIT
+
+DEADBOLT_STATE_DIR="$BLOCK_STATE" "$BIN/deadboltctl" block add-domain news.ycombinator.com
+DEADBOLT_STATE_DIR="$BLOCK_STATE" "$BIN/deadboltctl" block add-domain example.com
+DEADBOLT_STATE_DIR="$BLOCK_STATE" "$BIN/deadboltctl" block add-app com.apple.Safari
+
+BLOCK_JSON="$(DEADBOLT_STATE_DIR="$BLOCK_STATE" "$BIN/deadboltctl" block list --json)"
+echo "$BLOCK_JSON"
+[[ "$BLOCK_JSON" == *'news.ycombinator.com'* ]]
+[[ "$BLOCK_JSON" == *'example.com'* ]]
+[[ "$BLOCK_JSON" == *'com.apple.Safari'* ]]
+
+echo "== block remove-domain omits the domain =="
+DEADBOLT_STATE_DIR="$BLOCK_STATE" "$BIN/deadboltctl" block remove-domain news.ycombinator.com
+BLOCK_JSON="$(DEADBOLT_STATE_DIR="$BLOCK_STATE" "$BIN/deadboltctl" block list --json)"
+[[ "$BLOCK_JSON" != *'news.ycombinator.com'* ]]
+[[ "$BLOCK_JSON" == *'example.com'* ]]
+
+echo "== block remove-app omits the app =="
+DEADBOLT_STATE_DIR="$BLOCK_STATE" "$BIN/deadboltctl" block remove-app com.apple.Safari
+BLOCK_JSON="$(DEADBOLT_STATE_DIR="$BLOCK_STATE" "$BIN/deadboltctl" block list --json)"
+[[ "$BLOCK_JSON" != *'com.apple.Safari'* ]]
+DEADBOLT_STATE_DIR="$BLOCK_STATE" "$BIN/deadboltctl" block add-app com.apple.Safari
+
+echo "== block list persists across fresh invocations =="
+BLOCK_JSON="$(DEADBOLT_STATE_DIR="$BLOCK_STATE" "$BIN/deadboltctl" block list --json)"
+[[ "$BLOCK_JSON" == *'example.com'* ]]
+[[ "$BLOCK_JSON" == *'com.apple.Safari'* ]]
+
+printf '# pre comment\n127.0.0.1 localhost\n::1 localhost\n' > "$HOSTS_FILE"
+cat > "$APPS_FILE" <<'JSON'
+[
+  {"bundleIdentifier": "com.apple.Safari", "name": "Safari"},
+  {"bundleIdentifier": "com.apple.Mail", "name": "Mail"}
+]
+JSON
+
+echo "== enforce --dry-run changes nothing =="
+DEADBOLT_STATE_DIR="$BLOCK_STATE" "$BIN/deadboltctl" lock
+DRY_OUT="$(DEADBOLT_STATE_DIR="$BLOCK_STATE" DEADBOLT_FAKE_APPS="$APPS_FILE" "$BIN/deadboltctl" enforce --dry-run --hosts-path "$HOSTS_FILE")"
+echo "$DRY_OUT"
+[[ "$DRY_OUT" == *'hosts: would-apply'* ]]
+[[ "$DRY_OUT" == *'apps would terminate: 1'* ]]
+! grep -q 'BEGIN DEADBOLT' "$HOSTS_FILE"
+
+echo "== enforce while locked applies hosts block and terminates fake apps =="
+ENFORCE_OUT="$(DEADBOLT_STATE_DIR="$BLOCK_STATE" DEADBOLT_FAKE_APPS="$APPS_FILE" "$BIN/deadboltctl" enforce --hosts-path "$HOSTS_FILE")"
+echo "$ENFORCE_OUT"
+[[ "$ENFORCE_OUT" == *'hosts: applied'* ]]
+[[ "$ENFORCE_OUT" == *'apps terminated: 1'* ]]
+grep -q 'BEGIN DEADBOLT' "$HOSTS_FILE"
+grep -q '0.0.0.0 example.com' "$HOSTS_FILE"
+grep -q '0.0.0.0 www.example.com' "$HOSTS_FILE"
+grep -q '::1 example.com' "$HOSTS_FILE"
+grep -q '::1 www.example.com' "$HOSTS_FILE"
+
+echo "== applying a second time is idempotent (no duplicate block) =="
+HOSTS_SNAPSHOT="$(cat "$HOSTS_FILE")"
+DEADBOLT_STATE_DIR="$BLOCK_STATE" DEADBOLT_FAKE_APPS="$APPS_FILE" "$BIN/deadboltctl" enforce --hosts-path "$HOSTS_FILE" >/dev/null
+[[ "$(cat "$HOSTS_FILE")" == "$HOSTS_SNAPSHOT" ]]
+[[ "$(grep -c 'BEGIN DEADBOLT' "$HOSTS_FILE")" == "1" ]]
+
+echo "== enforce while unlocked clears the hosts block =="
+DEADBOLT_STATE_DIR="$BLOCK_STATE" "$BIN/deadboltctl" enroll 1 --fake "$KEYS_FIXTURE" --label "E2E Unlock"
+DEADBOLT_STATE_DIR="$BLOCK_STATE" "$BIN/deadboltctl" unlock --fake "$KEYS_FIXTURE"
+UNLOCK_OUT="$(DEADBOLT_STATE_DIR="$BLOCK_STATE" DEADBOLT_FAKE_APPS="$APPS_FILE" "$BIN/deadboltctl" enforce --hosts-path "$HOSTS_FILE")"
+echo "$UNLOCK_OUT"
+[[ "$UNLOCK_OUT" == *'hosts: cleared'* ]]
+! grep -q 'BEGIN DEADBOLT' "$HOSTS_FILE"
+grep -q '127.0.0.1 localhost' "$HOSTS_FILE"
+grep -q '# pre comment' "$HOSTS_FILE"
+
+echo "== enforce fails non-zero when hosts file not writable and leaves it unchanged =="
+NOTWRITABLE_STATE="$(mktemp -d -t deadbolt-state-notwritable)"
+NOTWRITABLE_HOSTS="$(mktemp -t deadbolt-hosts-notwritable)"
+trap 'rm -f "$FIXTURE" "$KEYS_FIXTURE" "$EMPTY_FIXTURE" "$HOSTS_FILE" "$APPS_FILE" "$NOTWRITABLE_HOSTS"; rm -rf "$STATE_DIR" "$E_STATE" "$D_STATE" "$I_STATE" "$BLOCK_STATE" "$NOTWRITABLE_STATE"' EXIT
+DEADBOLT_STATE_DIR="$NOTWRITABLE_STATE" "$BIN/deadboltctl" block add-domain example.com
+DEADBOLT_STATE_DIR="$NOTWRITABLE_STATE" "$BIN/deadboltctl" lock
+printf '# keep\n' > "$NOTWRITABLE_HOSTS"
+chmod 0444 "$NOTWRITABLE_HOSTS"
+if DEADBOLT_STATE_DIR="$NOTWRITABLE_STATE" DEADBOLT_FAKE_APPS="$APPS_FILE" "$BIN/deadboltctl" enforce --hosts-path "$NOTWRITABLE_HOSTS" >/dev/null 2>&1; then
+    echo "expected enforce to fail when hosts file not writable" >&2
+    exit 1
+fi
+[[ "$(cat "$NOTWRITABLE_HOSTS")" == "# keep" ]]
+chmod 0644 "$NOTWRITABLE_HOSTS"
+
+echo "== lock/unlock apply and clear enforcement when a hosts path is configured =="
+LOCK_ENFORCE_STATE="$(mktemp -d -t deadbolt-state-lockenf)"
+LOCK_ENFORCE_HOSTS="$(mktemp -t deadbolt-hosts-lockenf)"
+trap 'rm -f "$FIXTURE" "$KEYS_FIXTURE" "$EMPTY_FIXTURE" "$HOSTS_FILE" "$APPS_FILE" "$NOTWRITABLE_HOSTS" "$LOCK_ENFORCE_HOSTS"; rm -rf "$STATE_DIR" "$E_STATE" "$D_STATE" "$I_STATE" "$BLOCK_STATE" "$NOTWRITABLE_STATE" "$LOCK_ENFORCE_STATE"' EXIT
+printf '# keep me\n' > "$LOCK_ENFORCE_HOSTS"
+DEADBOLT_STATE_DIR="$LOCK_ENFORCE_STATE" "$BIN/deadboltctl" block add-domain example.com
+DEADBOLT_STATE_DIR="$LOCK_ENFORCE_STATE" DEADBOLT_HOSTS_PATH="$LOCK_ENFORCE_HOSTS" DEADBOLT_FAKE_APPS="$APPS_FILE" "$BIN/deadboltctl" lock
+grep -q 'BEGIN DEADBOLT' "$LOCK_ENFORCE_HOSTS"
+DEADBOLT_STATE_DIR="$LOCK_ENFORCE_STATE" "$BIN/deadboltctl" enroll 1 --fake "$KEYS_FIXTURE" --label "lockenf"
+DEADBOLT_STATE_DIR="$LOCK_ENFORCE_STATE" DEADBOLT_HOSTS_PATH="$LOCK_ENFORCE_HOSTS" "$BIN/deadboltctl" unlock --fake "$KEYS_FIXTURE"
+! grep -q 'BEGIN DEADBOLT' "$LOCK_ENFORCE_HOSTS"
+
+echo "== lock reports but does not crash when hosts file not writable =="
+NOTWRITABLE_LOCK_STATE="$(mktemp -d -t deadbolt-state-locknw)"
+NOTWRITABLE_LOCK_HOSTS="$(mktemp -t deadbolt-hosts-locknw)"
+trap 'rm -f "$FIXTURE" "$KEYS_FIXTURE" "$EMPTY_FIXTURE" "$HOSTS_FILE" "$APPS_FILE" "$NOTWRITABLE_HOSTS" "$LOCK_ENFORCE_HOSTS" "$NOTWRITABLE_LOCK_HOSTS"; rm -rf "$STATE_DIR" "$E_STATE" "$D_STATE" "$I_STATE" "$BLOCK_STATE" "$NOTWRITABLE_STATE" "$LOCK_ENFORCE_STATE" "$NOTWRITABLE_LOCK_STATE"' EXIT
+printf '# keep\n' > "$NOTWRITABLE_LOCK_HOSTS"
+chmod 0444 "$NOTWRITABLE_LOCK_HOSTS"
+DEADBOLT_STATE_DIR="$NOTWRITABLE_LOCK_STATE" DEADBOLT_HOSTS_PATH="$NOTWRITABLE_LOCK_HOSTS" "$BIN/deadboltctl" lock >/dev/null 2>&1
+DEADBOLT_STATE_DIR="$NOTWRITABLE_LOCK_STATE" "$BIN/deadboltctl" status --fake "$KEYS_FIXTURE" | grep -q 'state: locked'
+chmod 0644 "$NOTWRITABLE_LOCK_HOSTS"
+
 echo "E2E OK"

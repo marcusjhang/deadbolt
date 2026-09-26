@@ -25,13 +25,17 @@ case "keys":
 case "unenroll":
     runUnenroll(Array(arguments.dropFirst()))
 case "lock":
-    runLock()
+    runLock(Array(arguments.dropFirst()))
 case "unlock":
     runUnlock(Array(arguments.dropFirst()))
 case "status":
     runStatus(Array(arguments.dropFirst()))
 case "reset":
     runReset(Array(arguments.dropFirst()))
+case "block":
+    runBlock(Array(arguments.dropFirst()))
+case "enforce":
+    runEnforce(Array(arguments.dropFirst()))
 default:
     printUsage()
     exit(2)
@@ -49,7 +53,14 @@ func printUsage() {
     print("  unlock [--fake <fixture.json>]")
     print("  status [--json] [--fake <fixture.json>]")
     print("  reset --force")
-    print("environment: DEADBOLT_FAKE_DEVICES=<fixture.json>, DEADBOLT_STATE_DIR=<dir>")
+    print("  block add-domain <domain>")
+    print("  block remove-domain <domain>")
+    print("  block add-app <bundle-id>")
+    print("  block remove-app <bundle-id>")
+    print("  block list [--json]")
+    print("  enforce [--dry-run] [--hosts-path <path>]")
+    print("environment: DEADBOLT_FAKE_DEVICES=<fixture.json>, DEADBOLT_STATE_DIR=<dir>,")
+    print("             DEADBOLT_HOSTS_PATH=<hosts-path>, DEADBOLT_FAKE_APPS=<fixture.json>")
 }
 
 func resolveSource(arguments: [String]) throws -> DeviceSource {
@@ -194,10 +205,11 @@ func runUnenroll(_ arguments: [String]) {
     }
 }
 
-func runLock() {
+func runLock(_ arguments: [String]) {
     do {
         try LockStore(directory: StateDirectory.resolve()).write(.locked)
         print("locked")
+        enforceAfterLockChange(arguments: arguments, state: .locked)
     } catch {
         fputs("error: \(error)\n", stderr)
         exit(1)
@@ -215,9 +227,31 @@ func runUnlock(_ arguments: [String]) {
         }
         try LockStore(directory: StateDirectory.resolve()).write(.unlocked)
         print("unlocked")
+        enforceAfterLockChange(arguments: arguments, state: .unlocked)
     } catch {
         fputs("error: \(error)\n", stderr)
         exit(1)
+    }
+}
+
+/// After a lock/unlock, applies or clears enforcement when a hosts path is
+/// configured. Never fails the command: a non-writable hosts file is reported
+/// and the command continues.
+func enforceAfterLockChange(arguments: [String], state: LockState) {
+    guard let hostsPath = configuredHostsPath(arguments: arguments) else { return }
+    do {
+        let blockList = try BlockStore(directory: StateDirectory.resolve()).load()
+        let terminator = try resolveTerminator()
+        let report = try Enforcer.run(
+            state: state,
+            blockList: blockList,
+            hostsBlocker: HostsBlocker(hostsPath: hostsPath),
+            terminator: terminator,
+            dryRun: false
+        )
+        printEnforcement(report)
+    } catch {
+        fputs("warning: enforcement skipped: \(error)\n", stderr)
     }
 }
 
@@ -262,6 +296,139 @@ func runReset(_ arguments: [String]) {
 private struct StatusReport: Encodable {
     let state: String
     let attachedKey: String?
+}
+
+func runBlock(_ arguments: [String]) {
+    guard let sub = arguments.first else {
+        fputs("error: block requires a subcommand\n", stderr)
+        exit(2)
+    }
+    do {
+        let store = BlockStore(directory: StateDirectory.resolve())
+        switch sub {
+        case "add-domain":
+            guard let domain = arguments.dropFirst().first else {
+                fputs("error: add-domain requires a domain\n", stderr)
+                exit(2)
+            }
+            try store.addDomain(domain)
+            print("added domain \(domain)")
+        case "remove-domain":
+            guard let domain = arguments.dropFirst().first else {
+                fputs("error: remove-domain requires a domain\n", stderr)
+                exit(2)
+            }
+            try store.removeDomain(domain)
+            print("removed domain \(domain)")
+        case "add-app":
+            guard let bundleID = arguments.dropFirst().first else {
+                fputs("error: add-app requires a bundle identifier\n", stderr)
+                exit(2)
+            }
+            try store.addApp(bundleID)
+            print("added app \(bundleID)")
+        case "remove-app":
+            guard let bundleID = arguments.dropFirst().first else {
+                fputs("error: remove-app requires a bundle identifier\n", stderr)
+                exit(2)
+            }
+            try store.removeApp(bundleID)
+            print("removed app \(bundleID)")
+        case "list":
+            let list = try store.load()
+            if arguments.contains("--json") {
+                printBlockListJSON(list)
+            } else {
+                printBlockListHuman(list)
+            }
+        default:
+            fputs("error: unknown block subcommand '\(sub)'\n", stderr)
+            exit(2)
+        }
+    } catch {
+        fputs("error: \(error)\n", stderr)
+        exit(1)
+    }
+}
+
+func runEnforce(_ arguments: [String]) {
+    let dryRun = arguments.contains("--dry-run")
+    let hostsPath = HostsPath.resolve(
+        explicit: value(for: "--hosts-path", in: arguments),
+        environment: ProcessInfo.processInfo.environment
+    )
+    do {
+        let stateDir = StateDirectory.resolve()
+        let state = try LockStore(directory: stateDir).read()
+        let blockList = try BlockStore(directory: stateDir).load()
+        let terminator = try resolveTerminator()
+        let report = try Enforcer.run(
+            state: state,
+            blockList: blockList,
+            hostsBlocker: HostsBlocker(hostsPath: hostsPath),
+            terminator: terminator,
+            dryRun: dryRun
+        )
+        printEnforcement(report)
+    } catch {
+        fputs("error: \(error)\n", stderr)
+        exit(1)
+    }
+}
+
+func configuredHostsPath(arguments: [String]) -> String? {
+    if let explicit = value(for: "--hosts-path", in: arguments), !explicit.isEmpty {
+        return explicit
+    }
+    if let env = ProcessInfo.processInfo.environment["DEADBOLT_HOSTS_PATH"], !env.isEmpty {
+        return env
+    }
+    return nil
+}
+
+func resolveTerminator() throws -> AppTerminator {
+    if let env = ProcessInfo.processInfo.environment["DEADBOLT_FAKE_APPS"], !env.isEmpty {
+        return try FakeAppTerminator(contentsOf: URL(fileURLWithPath: env))
+    }
+    return SystemAppTerminator()
+}
+
+func printBlockListJSON(_ list: BlockList) {
+    let values = list.domains + list.apps
+    let data = try! DeadboltJSON.encoder.encode(values)
+    print(String(data: data, encoding: .utf8) ?? "")
+}
+
+func printBlockListHuman(_ list: BlockList) {
+    if list.domains.isEmpty && list.apps.isEmpty {
+        print("no blocked domains or apps")
+        return
+    }
+    for domain in list.domains {
+        print("domain\t\(domain)")
+    }
+    for app in list.apps {
+        print("app\t\(app)")
+    }
+}
+
+func printEnforcement(_ report: EnforcementResult) {
+    let action: String
+    switch (report.hostsAction, report.dryRun) {
+    case (.applied, true): action = "would-apply"
+    case (.cleared, true): action = "would-clear"
+    case (.applied, false): action = "applied"
+    case (.cleared, false): action = "cleared"
+    }
+    print("hosts: \(action)")
+    if report.hostsAction == .applied {
+        if report.dryRun {
+            print("apps would terminate: \(report.appsTerminated)")
+        } else {
+            print("apps terminated: \(report.appsTerminated)")
+        }
+        print("domains: \(report.domains)")
+    }
 }
 
 func extractSelector(_ arguments: [String]) -> String? {
