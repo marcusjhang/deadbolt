@@ -56,7 +56,12 @@ private func makeDiskIdentity(_ disk: DADisk) -> USBDeviceIdentity? {
 
     let removable = (dict[kDADiskDescriptionMediaRemovableKey as String] as? NSNumber)?.boolValue ?? false
     let internalDisk = (dict[kDADiskDescriptionDeviceInternalKey as String] as? NSNumber)?.boolValue ?? false
-    let isRemovable = removable && !internalDisk
+    let deviceProtocol = dict[kDADiskDescriptionDeviceProtocolKey as String] as? String
+    let isRemovable = isRemovableStorage(
+        mediaRemovable: removable,
+        deviceInternal: internalDisk,
+        deviceProtocol: deviceProtocol
+    )
 
     let vendorName = dict[kDADiskDescriptionDeviceVendorKey as String] as? String
     let productName = dict[kDADiskDescriptionDeviceModelKey as String] as? String
@@ -76,6 +81,34 @@ private func makeDiskIdentity(_ disk: DADisk) -> USBDeviceIdentity? {
         name: productName ?? vendorName ?? volumeUUID,
         location: nil
     )
+}
+
+/// A storage device is a removable candidate only when its media is removable,
+/// it is not an internal/fixed disk, and it is not a synthesized disk image
+/// (e.g. a mounted `.dmg`, which reports a synthesized/virtual protocol).
+/// Pure so the rule is unit-testable without hardware.
+public func isRemovableStorage(
+    mediaRemovable: Bool,
+    deviceInternal: Bool,
+    deviceProtocol: String?
+) -> Bool {
+    if deviceInternal { return false }
+    if !mediaRemovable { return false }
+    if let proto = deviceProtocol?.lowercased(),
+       isSynthesizedProtocol(proto) {
+        return false
+    }
+    return true
+}
+
+private func isSynthesizedProtocol(_ proto: String) -> Bool {
+    let trimmed = proto.trimmingCharacters(in: .whitespacesAndNewlines)
+    switch trimmed {
+    case "dmg", "disk image", "virtual", "virtual disk":
+        return true
+    default:
+        return false
+    }
 }
 
 private func volumeUUIDString(from dict: NSDictionary) -> String? {

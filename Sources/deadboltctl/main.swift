@@ -18,6 +18,20 @@ case "devices":
     runDevices(Array(arguments.dropFirst()))
 case "identify":
     runIdentify(Array(arguments.dropFirst()))
+case "enroll":
+    runEnroll(Array(arguments.dropFirst()))
+case "keys":
+    runKeys(Array(arguments.dropFirst()))
+case "unenroll":
+    runUnenroll(Array(arguments.dropFirst()))
+case "lock":
+    runLock()
+case "unlock":
+    runUnlock(Array(arguments.dropFirst()))
+case "status":
+    runStatus(Array(arguments.dropFirst()))
+case "reset":
+    runReset(Array(arguments.dropFirst()))
 default:
     printUsage()
     exit(2)
@@ -25,10 +39,17 @@ default:
 
 func printUsage() {
     print("deadboltctl (Deadbolt \(Deadbolt.version))")
-    print("usage: deadboltctl <devices|identify> [options]")
+    print("usage: deadboltctl <command> [options]")
     print("  devices [--json] [--fake <fixture.json>]")
     print("  identify <selector> [--fake <fixture.json>]")
-    print("environment: DEADBOLT_FAKE_DEVICES=<fixture.json>")
+    print("  enroll <selector> [--label NAME] [--allow-weak] [--allow-internal] [--fake <fixture.json>]")
+    print("  keys [--json]")
+    print("  unenroll <selector-or-label>")
+    print("  lock")
+    print("  unlock [--fake <fixture.json>]")
+    print("  status [--json] [--fake <fixture.json>]")
+    print("  reset --force")
+    print("environment: DEADBOLT_FAKE_DEVICES=<fixture.json>, DEADBOLT_STATE_DIR=<dir>")
 }
 
 func resolveSource(arguments: [String]) throws -> DeviceSource {
@@ -57,12 +78,8 @@ func runDevices(_ arguments: [String]) {
         let devices = try source.listDevices()
         if json {
             let records = devices.map(DeviceRecord.init(identity:))
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-            let data = try encoder.encode(records)
-            if let text = String(data: data, encoding: .utf8) {
-                print(text)
-            }
+            let data = try DeadboltJSON.encoder.encode(records)
+            print(String(data: data, encoding: .utf8) ?? "")
         } else {
             for (index, device) in devices.enumerated() {
                 let assessment = device.assessment
@@ -102,10 +119,156 @@ func runIdentify(_ arguments: [String]) {
     }
 }
 
+func runEnroll(_ arguments: [String]) {
+    guard let selectorValue = extractSelector(arguments) else {
+        fputs("error: enroll requires a selector\n", stderr)
+        exit(2)
+    }
+
+    let allowWeak = arguments.contains("--allow-weak")
+    let allowInternal = arguments.contains("--allow-internal")
+
+    do {
+        let source = try resolveSource(arguments: arguments)
+        let devices = try source.listDevices()
+        guard let device = selectDevice(selectorValue, from: devices) else {
+            fputs("error: no device matches selector '\(selectorValue)'\n", stderr)
+            exit(1)
+        }
+        try EnrollmentPolicy.validate(device, allowWeak: allowWeak, allowInternal: allowInternal)
+
+        let label = value(for: "--label", in: arguments) ?? device.displayName
+        let assessment = device.assessment
+        let record = KeyRecord(
+            fingerprint: device.fingerprint,
+            tier: assessment.tier,
+            label: label,
+            createdAt: Date()
+        )
+        try KeyRegistry(directory: StateDirectory.resolve()).enroll(record)
+        print("enrolled \(record.label) (tier \(record.tier.rawValue)) \(record.fingerprint)")
+    } catch {
+        fputs("error: \(error)\n", stderr)
+        exit(1)
+    }
+}
+
+func runKeys(_ arguments: [String]) {
+    let json = arguments.contains("--json")
+    do {
+        let keys = try KeyRegistry(directory: StateDirectory.resolve()).load()
+        if json {
+            let data = try DeadboltJSON.encoder.encode(keys)
+            print(String(data: data, encoding: .utf8) ?? "")
+        } else {
+            if keys.isEmpty {
+                print("no keys enrolled")
+            } else {
+                let formatter = ISO8601DateFormatter()
+                for (index, key) in keys.enumerated() {
+                    print("\(index + 1)\t\(key.tier.rawValue)\t\(key.label)\t\(key.fingerprint)\t\(formatter.string(from: key.createdAt))")
+                }
+            }
+        }
+    } catch {
+        fputs("error: \(error)\n", stderr)
+        exit(1)
+    }
+}
+
+func runUnenroll(_ arguments: [String]) {
+    guard let selectorValue = extractSelector(arguments) else {
+        fputs("error: unenroll requires a selector or label\n", stderr)
+        exit(2)
+    }
+    do {
+        let removed = try KeyRegistry(directory: StateDirectory.resolve()).unenroll(selectorValue)
+        if removed == 0 {
+            fputs("error: no enrolled key matches '\(selectorValue)'\n", stderr)
+            exit(1)
+        }
+        print("unenrolled \(removed) key(s)")
+    } catch {
+        fputs("error: \(error)\n", stderr)
+        exit(1)
+    }
+}
+
+func runLock() {
+    do {
+        try LockStore(directory: StateDirectory.resolve()).write(.locked)
+        print("locked")
+    } catch {
+        fputs("error: \(error)\n", stderr)
+        exit(1)
+    }
+}
+
+func runUnlock(_ arguments: [String]) {
+    do {
+        let source = try resolveSource(arguments: arguments)
+        let devices = try source.listDevices()
+        let keys = try KeyRegistry(directory: StateDirectory.resolve()).load()
+        guard LockMachine.canUnlock(devices: devices, keys: keys) else {
+            fputs("error: no enrolled key attached\n", stderr)
+            exit(1)
+        }
+        try LockStore(directory: StateDirectory.resolve()).write(.unlocked)
+        print("unlocked")
+    } catch {
+        fputs("error: \(error)\n", stderr)
+        exit(1)
+    }
+}
+
+func runStatus(_ arguments: [String]) {
+    let json = arguments.contains("--json")
+    do {
+        let state = try LockStore(directory: StateDirectory.resolve()).read()
+        let keys = try KeyRegistry(directory: StateDirectory.resolve()).load()
+        let source = try resolveSource(arguments: arguments)
+        let devices = try source.listDevices()
+        let attached = LockMachine.attachedKey(devices: devices, keys: keys)
+
+        if json {
+            let report = StatusReport(state: state.rawValue, attachedKey: attached?.label)
+            let data = try DeadboltJSON.encoder.encode(report)
+            print(String(data: data, encoding: .utf8) ?? "")
+        } else {
+            print("state: \(state.rawValue)")
+            print("attachedKey: \(attached?.label ?? "none")")
+        }
+    } catch {
+        fputs("error: \(error)\n", stderr)
+        exit(1)
+    }
+}
+
+func runReset(_ arguments: [String]) {
+    guard arguments.contains("--force") else {
+        fputs("error: reset requires --force\n", stderr)
+        exit(2)
+    }
+    do {
+        try KeyRegistry(directory: StateDirectory.resolve()).removeAll()
+        try LockStore(directory: StateDirectory.resolve()).remove()
+        print("reset complete")
+    } catch {
+        fputs("error: \(error)\n", stderr)
+        exit(1)
+    }
+}
+
+private struct StatusReport: Encodable {
+    let state: String
+    let attachedKey: String?
+}
+
 func extractSelector(_ arguments: [String]) -> String? {
+    let valueFlags: Set<String> = ["--fake", "--label"]
     var skipNext = false
     for argument in arguments {
-        if argument == "--fake" {
+        if valueFlags.contains(argument) {
             skipNext = true
             continue
         }
@@ -117,6 +280,13 @@ func extractSelector(_ arguments: [String]) -> String? {
         return argument
     }
     return nil
+}
+
+func value(for flag: String, in arguments: [String]) -> String? {
+    guard let index = arguments.firstIndex(of: flag), index + 1 < arguments.count else {
+        return nil
+    }
+    return arguments[index + 1]
 }
 
 func selectDevice(_ selector: String, from devices: [USBDeviceIdentity]) -> USBDeviceIdentity? {
