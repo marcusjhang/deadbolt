@@ -1,5 +1,6 @@
 .psf/
 .build/
+build/
 DerivedData/
 .DS_Store
 *.xcodeproj
