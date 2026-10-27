@@ -160,6 +160,12 @@ func runEnroll(_ arguments: [String]) {
 
         let label = value(for: "--label", in: arguments) ?? device.displayName
         let assessment = device.assessment
+        if assessment.tier == .D && allowWeak {
+            fputs(
+                "warning: enrolling a weak (tier D) key via --allow-weak opt-in; this identity is not unique and can be spoofed\n",
+                stderr
+            )
+        }
         let record = KeyRecord(
             fingerprint: device.fingerprint,
             tier: assessment.tier,

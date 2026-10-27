@@ -47,6 +47,18 @@ final class USBDeviceIdentityTests: XCTestCase {
         XCTAssertTrue(device.assessment.refused)
     }
 
+    func testMissingIdentityIsRefused() {
+        let empty = USBDeviceIdentity()
+        XCTAssertEqual(empty.tier, .E)
+        XCTAssertTrue(empty.assessment.refused)
+    }
+
+    func testVidPidWithoutUsableIdentityIsRefused() {
+        let device = USBDeviceIdentity(vendorID: 0x1234, productID: 0x5678)
+        XCTAssertEqual(device.tier, .E)
+        XCTAssertTrue(device.assessment.refused)
+    }
+
     func testAllZerosSerialIsPlaceholder() {
         XCTAssertTrue(isPlaceholderSerial("000000000"))
         XCTAssertNil(USBDeviceIdentity(

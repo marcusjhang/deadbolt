@@ -99,14 +99,11 @@ final class KeyRegistryTests: XCTestCase {
     }
 
     func testUnenrollByLabelAndByFingerprint() throws {
-        let a = KeyRecord(fingerprint: "fp-a", tier: .A, label: "Key One", createdAt: Date())
-        let b = KeyRecord(fingerprint: "fp-b", tier: .B, label: "Key Two", createdAt: Date())
-        try registry.enroll(a)
-        try registry.enroll(b)
-
+        try registry.enroll(KeyRecord(fingerprint: "fp-a", tier: .A, label: "Key One", createdAt: Date()))
         XCTAssertEqual(try registry.unenroll("KEY one"), 1)
-        XCTAssertEqual(try registry.load().count, 1)
+        XCTAssertTrue(try registry.load().isEmpty)
 
+        try registry.enroll(KeyRecord(fingerprint: "fp-b", tier: .B, label: "Key Two", createdAt: Date()))
         XCTAssertEqual(try registry.unenroll("fp-b"), 1)
         XCTAssertTrue(try registry.load().isEmpty)
     }
@@ -119,6 +116,37 @@ final class KeyRegistryTests: XCTestCase {
         try registry.enroll(KeyRecord(fingerprint: "fp-a", tier: .A, label: "K", createdAt: Date()))
         let fresh = KeyRegistry(directory: directory)
         XCTAssertEqual(try fresh.load().count, 1)
+    }
+
+    func testEnrollReplacesExistingKey() throws {
+        let first = KeyRecord(fingerprint: "fp-a", tier: .A, label: "First", createdAt: Date())
+        let second = KeyRecord(fingerprint: "fp-b", tier: .B, label: "Second", createdAt: Date())
+        try registry.enroll(first)
+        try registry.enroll(second)
+
+        let keys = try registry.load()
+        XCTAssertEqual(keys.count, 1)
+        XCTAssertEqual(keys[0].fingerprint, "fp-b")
+        XCTAssertEqual(keys[0].label, "Second")
+    }
+
+    func testEnrollSuitableDevicePersistsExactlyOneKeyRoundTrip() throws {
+        let device = USBDeviceIdentity(vendorID: 1234, productID: 5678, serialNumber: "ABC123456789")
+        try EnrollmentPolicy.validate(device, allowWeak: false, allowInternal: false)
+        let record = KeyRecord(
+            fingerprint: device.fingerprint,
+            tier: device.tier,
+            label: "My Key",
+            createdAt: Date(timeIntervalSince1970: 1_700_000_000)
+        )
+        try registry.enroll(record)
+
+        let fresh = KeyRegistry(directory: directory)
+        let keys = try fresh.load()
+        XCTAssertEqual(keys.count, 1)
+        XCTAssertEqual(keys[0].fingerprint, device.fingerprint)
+        XCTAssertEqual(keys[0].tier, .A)
+        XCTAssertEqual(keys[0].label, "My Key")
     }
 
     func testIsRemovableStorageRules() {
