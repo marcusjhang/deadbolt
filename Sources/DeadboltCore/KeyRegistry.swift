@@ -25,10 +25,10 @@ public struct KeyRegistry {
         try data.write(to: keysFileURL, options: .atomic)
     }
 
+    /// Enrolls a key, replacing any existing key so the registry never holds
+    /// more than one enrolled key.
     public func enroll(_ record: KeyRecord) throws {
-        var keys = try load()
-        keys.append(record)
-        try save(keys)
+        try save([record])
     }
 
     /// Removes any enrolled key whose fingerprint or label matches

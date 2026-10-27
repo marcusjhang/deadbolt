@@ -50,6 +50,26 @@ final class LockStateTests: XCTestCase {
         XCTAssertFalse(LockMachine.canUnlock(devices: [other], keys: [key]))
     }
 
+    func testTierBMismatchNeverMatches() throws {
+        let enrolled = USBDeviceIdentity(volumeUUID: "11111111-2222-3333-4444-555555555555")
+        let key = KeyRecord(fingerprint: enrolled.fingerprint, tier: .B, label: "Key", createdAt: Date())
+        try registry.enroll(key)
+
+        let different = USBDeviceIdentity(volumeUUID: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE")
+        XCTAssertFalse(LockMachine.canUnlock(devices: [different], keys: [key]))
+        XCTAssertNil(LockMachine.attachedKey(devices: [different], keys: [key]))
+    }
+
+    func testTierCMismatchNeverMatches() throws {
+        let enrolled = USBDeviceIdentity(vendorID: 1, productID: 2, containerID: "C0FFEE")
+        let key = KeyRecord(fingerprint: enrolled.fingerprint, tier: .C, label: "Key", createdAt: Date())
+        try registry.enroll(key)
+
+        let different = USBDeviceIdentity(vendorID: 1, productID: 2, containerID: "DECAF")
+        XCTAssertFalse(LockMachine.canUnlock(devices: [different], keys: [key]))
+        XCTAssertNil(LockMachine.attachedKey(devices: [different], keys: [key]))
+    }
+
     func testAttachedKeyNamesWhichKeyMatches() throws {
         let device = USBDeviceIdentity(
             vendorID: 1234, productID: 5678, serialNumber: "ABC123456789"

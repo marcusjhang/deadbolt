@@ -65,7 +65,8 @@ cat > "$KEYS_FIXTURE" <<'JSON'
   {"vendorID": 1234, "productID": 5678, "serialNumber": "ABC123456789", "name": "Key A", "location": "0x34000000"},
   {"vendorID": 1234, "productID": 5678, "vendorName": "Acme", "productName": "Widget", "name": "Key D"},
   {"serialNumber": "000000000", "name": "Key E placeholder"},
-  {"vendorID": 9999, "productID": 8888, "serialNumber": "FIXED123456", "name": "Internal Disk", "isRemovable": false}
+  {"vendorID": 9999, "productID": 8888, "serialNumber": "FIXED123456", "name": "Internal Disk", "isRemovable": false},
+  {"name": "Missing Identity"}
 ]
 JSON
 
@@ -91,17 +92,37 @@ echo "$KEYS_HUMAN"
 [[ "$KEYS_HUMAN" == *'Spare Drive'* ]]
 [[ "$KEYS_HUMAN" == *$'\tA\t'* ]]
 
+echo "== single-key enrollment: a second suitable device replaces the first =="
+SINGLE_DIR="$STATE_DIR/single"
+DEADBOLT_STATE_DIR="$SINGLE_DIR" "$BIN/deadboltctl" enroll "Key A" --fake "$FIXTURE" --label "First Key"
+DEADBOLT_STATE_DIR="$SINGLE_DIR" "$BIN/deadboltctl" enroll "Key B" --fake "$FIXTURE" --label "Second Key"
+SINGLE_KEYS="$(DEADBOLT_STATE_DIR="$SINGLE_DIR" "$BIN/deadboltctl" keys --json)"
+echo "$SINGLE_KEYS"
+[[ "$(echo "$SINGLE_KEYS" | grep -c '"fingerprint"')" == "1" ]]
+[[ "$SINGLE_KEYS" == *'"label" : "Second Key"'* ]]
+[[ "$SINGLE_KEYS" != *'"label" : "First Key"'* ]]
+
 echo "== fingerprint stable when only location changes =="
-DEADBOLT_STATE_DIR="$STATE_DIR" "$BIN/deadboltctl" enroll 1 --fake "$KEYS_FIXTURE" --label "Loc A"
-DEADBOLT_STATE_DIR="$STATE_DIR" "$BIN/deadboltctl" enroll 2 --fake "$KEYS_FIXTURE" --label "Loc B"
-FP_COUNT="$(DEADBOLT_STATE_DIR="$STATE_DIR" "$BIN/deadboltctl" keys --json | grep -o '"fingerprint" : "[a-f0-9]*"' | sort -u | wc -l | tr -d ' ')"
-[[ "$FP_COUNT" == "1" ]]
+FP_DIR="$STATE_DIR/fp"
+DEADBOLT_STATE_DIR="$FP_DIR" "$BIN/deadboltctl" enroll 1 --fake "$KEYS_FIXTURE" --label "Loc A"
+FP_A="$(DEADBOLT_STATE_DIR="$FP_DIR" "$BIN/deadboltctl" keys --json | grep -o '"fingerprint" : "[a-f0-9]*"')"
+DEADBOLT_STATE_DIR="$FP_DIR" "$BIN/deadboltctl" enroll 2 --fake "$KEYS_FIXTURE" --label "Loc B"
+FP_B="$(DEADBOLT_STATE_DIR="$FP_DIR" "$BIN/deadboltctl" keys --json | grep -o '"fingerprint" : "[a-f0-9]*"')"
+[[ -n "$FP_A" ]]
+[[ "$FP_A" == "$FP_B" ]]
 
 echo "== Tier E enrollment refused (non-zero, no key written) =="
 E_STATE="$(mktemp -d -t deadbolt-state-e)"
 trap 'rm -f "$FIXTURE" "$KEYS_FIXTURE" "$EMPTY_FIXTURE"; rm -rf "$STATE_DIR" "$E_STATE"' EXIT
 if DEADBOLT_STATE_DIR="$E_STATE" "$BIN/deadboltctl" enroll "Key E placeholder" --fake "$KEYS_FIXTURE" >/dev/null 2>&1; then
     echo "expected Tier E enrollment to fail" >&2
+    exit 1
+fi
+[[ ! -f "$E_STATE/keys.json" ]]
+
+echo "== a device with no usable identity is refused =="
+if DEADBOLT_STATE_DIR="$E_STATE" "$BIN/deadboltctl" enroll "Missing Identity" --fake "$KEYS_FIXTURE" >/dev/null 2>&1; then
+    echo "expected missing-identity enrollment to fail" >&2
     exit 1
 fi
 [[ ! -f "$E_STATE/keys.json" ]]
@@ -114,8 +135,12 @@ if DEADBOLT_STATE_DIR="$D_STATE" "$BIN/deadboltctl" enroll "Key D" --fake "$KEYS
     exit 1
 fi
 [[ ! -f "$D_STATE/keys.json" ]]
-DEADBOLT_STATE_DIR="$D_STATE" "$BIN/deadboltctl" enroll "Key D" --fake "$KEYS_FIXTURE" --allow-weak
+D_ENROLL_OUT="$(DEADBOLT_STATE_DIR="$D_STATE" "$BIN/deadboltctl" enroll "Key D" --fake "$KEYS_FIXTURE" --allow-weak 2>&1)"
+echo "$D_ENROLL_OUT"
 [[ -f "$D_STATE/keys.json" ]]
+[[ "$D_ENROLL_OUT" == *'warning'* ]]
+[[ "$D_ENROLL_OUT" == *'weak'* ]]
+[[ "$D_ENROLL_OUT" == *'--allow-weak'* ]]
 
 echo "== non-removable/internal requires --allow-internal =="
 I_STATE="$(mktemp -d -t deadbolt-state-i)"
@@ -148,6 +173,21 @@ if DEADBOLT_STATE_DIR="$STATE_DIR" "$BIN/deadboltctl" unlock --fake "$EMPTY_FIXT
 fi
 STATUS_STILL_LOCKED="$(DEADBOLT_STATE_DIR="$STATE_DIR" "$BIN/deadboltctl" status --fake "$EMPTY_FIXTURE")"
 [[ "$STATUS_STILL_LOCKED" == *'state: locked'* ]]
+
+echo "== a different device of the same tier never matches the enrolled key =="
+cat > "$STATE_DIR/mismatch.json" <<'JSON'
+[
+  {"vendorID": 1234, "productID": 5678, "serialNumber": "DIFFERENT-SERIAL-99", "name": "Other Key"}
+]
+JSON
+STATUS_MISMATCH="$(DEADBOLT_STATE_DIR="$STATE_DIR" "$BIN/deadboltctl" status --fake "$STATE_DIR/mismatch.json")"
+echo "$STATUS_MISMATCH"
+[[ "$STATUS_MISMATCH" == *'attachedKey: none'* ]]
+if DEADBOLT_STATE_DIR="$STATE_DIR" "$BIN/deadboltctl" unlock --fake "$STATE_DIR/mismatch.json" >/dev/null 2>&1; then
+    echo "expected unlock to fail when a different device of the same tier is present" >&2
+    exit 1
+fi
+[[ "$(DEADBOLT_STATE_DIR="$STATE_DIR" "$BIN/deadboltctl" status --fake "$STATE_DIR/mismatch.json")" == *'state: locked'* ]]
 
 echo "== unlock succeeds when matching key attached =="
 DEADBOLT_STATE_DIR="$STATE_DIR" "$BIN/deadboltctl" unlock --fake "$KEYS_FIXTURE"
